@@ -1,0 +1,651 @@
+---
+title: "manuscript-figures"
+author: "Zena Lapp"
+date: "3/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ape)
+library(cowplot)
+library(ggtree)
+library(thd)
+library(exact2x2)
+library(pheatmap)
+library(ggplotify)
+library(readxl)
+library(colorspace)
+library(ggalluvial)
+
+theme_set(theme_bw() + theme(strip.background = element_rect(fill="white",linetype='blank'), text=element_text(size=15)))
+
+# grob plotting function to plot panel colors
+plot_panel_cols <- function(p, fills){
+  gt <- ggplot_gtable(ggplot_build(p))
+  strip_both <- which(grepl('strip-', gt$layout$name))
+  k <- 1
+  for (i in strip_both) {
+    j <- which(grepl('rect', gt$grobs[[i]]$grobs[[1]]$childrenOrder))
+    gt$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
+    k <- k+1
+  }
+  as.ggplot(gt)
+}
+
+tr <- read.tree('data/st258.tree')
+dists <- read.delim('data/st258_dists.tsv', sep = '\t')
+# cannot provide all of this data, but included what we could
+isolate_info <- read_tsv('data/isolate_info.tsv') %>% filter(!is.na(colistin_disc))
+var_annots <- read_tsv('data/known_variant_annots.tsv')
+var_annots <- var_annots %>% mutate(gene = gsub('two-component system sensor histidine kinaseQ','q',gene),
+                                    gene = gsub('b$','B',gene),
+                                    gene = gsub('q$','Q',gene),
+                                    gene = gsub('p$','P',gene),
+                                    gene = gsub('a$','A' , gene),
+                                    gene = gsub('subunit IIB','',gene))
+vars <- read.delim('data/known_variants.tsv', header = FALSE)
+varnames <- vars[1,1:ncol(vars)-1]
+vars <- vars[2:nrow(vars),]
+rownames(vars) <- vars[,1]
+vars <- as.matrix(vars[,2:ncol(vars)])
+class(vars) <- "numeric"
+
+isolate_info <- isolate_info %>% arrange(colistin_disc, Cx_date) %>% filter(!duplicated(Patient_ID)) %>% 
+   mutate(col_grp = gsub('_',' ',str_to_sentence(col_grp)),
+         col_grp = ifelse(col_grp %in% c('S novar','S other'),'S non-revertant',col_grp),
+         col_grp = factor(col_grp, levels = rev(c('S non-revertant', 'S revertant', 'R cluster', 'R singleton')))
+         )
+
+# can't include this data
+pt_dat <- read_excel('data/459_patients_data_for_posting.xls') %>% 
+  filter(isolate_no %in% gsub('PCMP_H','',isolate_info$isolate_no))
+
+more_info <- pt_dat %>% 
+  select(-c(colistinMIC, Patient_ID, LTACH, state, Cx_date, source, colistin30, polymyxin30, poly_colistin30)) %>% 
+  mutate(isolate_no = paste0('PCMP_H',isolate_no)) %>% 
+  right_join(isolate_info) %>% 
+  mutate(colistin_treat = factor(ifelse(grepl('colistin', empiric) | grepl('colistin', definitive),
+                                       'Yes', 'No'), levels = c('Yes','No')))
+```
+
+```{r}
+# colors
+colors <- c(R='lightcoral',S='lightblue')
+# group colors
+grp_cols <- c(colors['R'], 
+              adjustcolor(colors['S'],offset = rep(-0.2,4)),
+              adjustcolor(colors[c('R')], offset = rep(0.2,4)), 
+              colors['S'], 
+              colors['S'], 
+              adjustcolor(colors['S'],offset = rep(-0.1,4)),
+              'lightgrey')
+names(grp_cols) <- c('R cluster','S revertant','R singleton','S non-revertant', 'S novar', 'S other', 'No confidence')
+```
+
+# Some numbers
+
+## Number of resistant and susceptible
+
+```{r}
+nrow(isolate_info)
+isolate_info %>% group_by(colistin_disc) %>% summarize(count=n(), frac=count/nrow(isolate_info))
+```
+
+## Number of explainable resistant
+
+### Known
+
+```{r}
+tab_rtypes <- table(isolate_info$site_type_putative_r[isolate_info$colistin_disc == 'R'])
+sum(tab_rtypes)
+unname(sum(tab_rtypes) - tab_rtypes['gwas_r'])
+unname((sum(tab_rtypes) - tab_rtypes['gwas_r'])/sum(isolate_info$colistin_disc == 'R'))
+```
+
+### GWAS
+
+```{r}
+unname(tab_rtypes['gwas_r'])
+sum(is.na(isolate_info$site_type_putative_r[isolate_info$colistin_disc == 'R']))+unname(tab_rtypes['gwas_r'])
+unname(tab_rtypes['gwas_r']/(sum(is.na(isolate_info$site_type_putative_r[isolate_info$colistin_disc == 'R']))+unname(tab_rtypes['gwas_r'])))
+```
+
+qsec and pts
+
+```{r}
+table(isolate_info$site_type_putative_r[isolate_info$colistin_disc == 'R'], isolate_info$genes_r[isolate_info$colistin_disc == 'R'])
+```
+
+## Number of de novo vs. clusters
+
+singletons
+
+```{r}
+sum(isolate_info$col_grp == 'R singleton')
+sum(isolate_info$colistin_disc == 'R')
+sum(isolate_info$col_grp == 'R singleton')/sum(isolate_info$colistin_disc == 'R')
+```
+
+2 big clusters
+
+```{r}
+colistin <- isolate_info %>% select(isolate_no, colistin_disc) %>% deframe()
+colistin <- colistin[rownames(vars)]
+names(colistin) <- rownames(vars)
+sum(colistin[rownames(vars)[rowSums(vars[,which(colSums(vars) > 20)]) > 0]] == 'R', na.rm = TRUE)
+sum(isolate_info$colistin_disc == 'R')
+sum(colistin[rownames(vars)[rowSums(vars[,which(colSums(vars) > 20)]) > 0]] == 'R', na.rm = TRUE)/sum(isolate_info$colistin_disc == 'R')
+```
+
+
+# Main figures
+
+## Number of variants in known genes split by R/S
+
+```{r}
+f1a <- isolate_info %>% 
+  mutate(var_ct=factor(ifelse(var_ct < 3, var_ct, '≥3'), levels = c(0,1,2,'≥3'))) %>% 
+  ggplot(aes(x = var_ct, (..count..)/sum(..count..), fill = colistin_disc)) + 
+  geom_bar(position=position_dodge2(preserve = "single"), color = 'white') +
+  geom_bar(position=position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = adjustcolor(colors, alpha = 0.75),
+                    labels = c('Resistant','Susceptible')) +
+  labs(x = 'Number of variants in resistance genes', y = 'Fraction of isolates', fill = 'Colistin')
+f1a
+```
+
+
+
+## Number of variants vs. MIC for R isolates
+
+
+```{r}
+f1b <- isolate_info %>% 
+  mutate(var_ct=factor(ifelse(var_ct < 3, var_ct, '≥3'), levels = c(0,1,2,'≥3')),
+         putative_r=site_type_putative_r,
+         putative_r=ifelse(putative_r %in% c('known','known_site','putative_r'), 'Canonical gene', putative_r),
+         putative_r=ifelse(putative_r %in% c('gwas_r'), 'Non-canonical gene', putative_r),
+         putative_r=ifelse(!putative_r %in% c('Canonical gene', 'Non-canonical gene'), 'Neither', putative_r),
+         putative_r=factor(putative_r, levels = c('Canonical gene','Non-canonical gene','Neither'))
+         ) %>% 
+  ggplot(aes(x = var_ct, y = colistin_mic)) + 
+  geom_violin() + 
+  geom_jitter(aes(shape = putative_r), alpha = 0.2, size = 2) + scale_shape_manual(values = c(19, 8, 1)) +
+  scale_y_continuous(trans = 'log2', 
+                     breaks = c(0.25, 0.5, 1, 2, 4, 8, 16, 32, 64),
+                     labels = c('≤0.25', 0.5, 1, 2, 4, 8, 16, 32, '≥64')) +
+    stat_summary(fun=median, geom="point", size=4, shape =18, aes(col = colistin_disc)) + 
+  scale_color_manual(values=colors,
+                     labels=c('Resistant','Susceptible')) +
+  facet_grid(colistin_disc~., scales = 'free_y',labeller = as_labeller(c(R='Resistant',S='Susceptible'))) +
+    labs(x = 'Number of variants in resistance genes', y = 'Colistin MIC', shape = 'Putative resistance\nvariant in:', col = 'Median colistin MIC:') 
+f1b <- plot_panel_cols(f1b, adjustcolor(colors[c('R','S')],alpha.f = 0.75))
+f1b
+```
+
+```{r}
+# r <=1 vs. r >=2
+summary(isolate_info$colistin_mic[isolate_info$colistin_disc == 'R' & isolate_info$var_ct <= 1])
+summary(isolate_info$colistin_mic[isolate_info$colistin_disc == 'R' & isolate_info$var_ct >= 2])
+wilcox.test(isolate_info$colistin_mic[isolate_info$colistin_disc == 'R' & isolate_info$var_ct <= 1], isolate_info$colistin_mic[isolate_info$colistin_disc == 'R' & isolate_info$var_ct >= 2])$p.value
+
+# s <=1 vs. s >=2
+summary(isolate_info$colistin_mic[isolate_info$colistin_disc == 'S' & isolate_info$var_ct <= 1])
+summary(isolate_info$colistin_mic[isolate_info$colistin_disc == 'S' & isolate_info$var_ct >= 2])
+wilcox.test(isolate_info$colistin_mic[isolate_info$colistin_disc == 'S' & isolate_info$var_ct <= 1], isolate_info$colistin_mic[isolate_info$colistin_disc == 'S' & isolate_info$var_ct >= 2])$p.value
+```
+
+```{r}
+s_vcgt1_rgene <- isolate_info %>% filter(colistin_disc == 'S' & var_ct > 1) %>% 
+  select(site_type_putative_r) %>% unlist() %>% is.na() %>% table()
+s_vcgt1_rgene
+sum(s_vcgt1_rgene)
+s_vcgt1_rgene/sum(s_vcgt1_rgene)
+```
+
+
+## Combined 
+
+```{r}
+f1 <- plot_grid(plot_grid(f1a,NULL, rel_widths = c(9.3,1)), f1b, labels = 'AUTO', nrow = 2) 
+ggsave('figures/Fig1.png', f1, width = 7, height = 7)
+f1
+```
+
+
+## Phylogeny with variants
+
+```{r}
+col_grps <- isolate_info %>% select(isolate_no, col_grp) %>% 
+  deframe() %>% factor()
+tr_ar <- keep.tip(tr, names(col_grps))
+col_grps <- as.character(col_grps[tr_ar$tip.label])
+names(col_grps) <- tr_ar$tip.label
+col_grps[is.na(col_grps)] <- 'No confidence'
+ar <- ace(col_grps, tr_ar, typ = 'discrete')
+
+tip_grps <- col_grps
+edge_grps <- colnames(ar$lik.anc)[apply(ar$lik.anc, 1, which.max)]
+names(edge_grps) <- (1+Ntip(tr_ar)):(Ntip(tr_ar)+length(edge_grps))
+edge_grps[apply(ar$lik.anc, 1, max) < 0.8] <- 'No confidence'
+
+
+tr_ar$grp <- c(tip_grps, edge_grps)
+tr_ar$grp[is.na(tr_ar$grp)] <- 'No confidence' 
+
+td <- data.frame(node = nodeid(tr_ar, names(col_grps)),
+               trait = col_grps)
+nd <- data.frame(node = names(edge_grps), trait = edge_grps)
+
+d <- rbind(td, nd)
+d$node <- as.numeric(d$node)
+tr_plot <- full_join(tr_ar, d, by = 'node')
+
+tipgrp <- c(as.character(col_grps), rep('No confidence', Nnode(tr_ar)))
+names(tipgrp) <- tr_ar$tip.label
+tipgrp[is.na(tipgrp)] <- 'No confidence'
+
+clade_names <- isolate_info %>% select(isolate_no, clades) %>% deframe()
+
+tipshape <- c(as.character(clade_names), rep('No confidence', Nnode(tr_ar)))
+names(tipshape) <- tr_ar$tip.label
+
+
+tr_ann <- apply(vars[,which(colSums(vars) > 20)], 1, function(x){
+  i <- which(x == 1)
+  if(length(i) == 0){
+    i <- NA
+  }
+  i
+})
+
+tr_ann <- sapply(var_annots$var[which(colSums(vars) > 20)], function(x){
+  gsub('p\\.','',paste(strsplit(x,'\\|')[[1]][c(9, 6)], collapse = ' '))
+})[tr_ann]
+
+tr_ann <- data.frame(clade_names[rownames(vars)], tr_ann)
+rownames(tr_ann) <- rownames(vars)
+
+clade_i_mrca <- getMRCA(tr_ar, isolate_info$isolate_no[isolate_info$clades == 'clade I'])
+clade_iib_mrca <- getMRCA(tr_ar, isolate_info$isolate_no[isolate_info$clades == 'clade IIB'])
+clade_iia_mrca <- getMRCA(tr_ar, isolate_info$isolate_no[isolate_info$clades == 'clade IIA' & isolate_info$isolate_no != 'PCMP_H2'])
+
+tr_grps <- ggtree(tr_plot, aes(color=trait)) + 
+  geom_tippoint(aes(col=tipgrp)) + 
+  scale_color_manual(values = grp_cols,
+                     ) + 
+  labs(col = 'Resistance group') +
+  geom_point2(aes(subset= node %in% c(clade_i_mrca, clade_iia_mrca, clade_iib_mrca)), color='black', shape = 18, size=4) +
+  geom_label2(aes(label = 'Clade I', subset=node==clade_i_mrca), color='black', size=4, nudge_x = -0.000003, nudge_y = 7, label.size=NA) +
+  geom_label2(aes(label = 'Clade IIA', subset=node==clade_iia_mrca), color='black', size=4, nudge_x = -0.0000035, nudge_y = 8, label.size=NA) +
+  geom_label2(aes(label = 'Clade IIB', subset=node==(clade_iib_mrca)), color='black', size=4, nudge_x = -0.0000035, nudge_y = 8, label.size=NA)
+```
+
+## Heatmap with variants
+
+```{r}
+rstypes <- var_annots$literature
+rstypes[rstypes %in% c('gwas_r','known','known_site','putative_r')] <- 'r'
+rstypes[rstypes %in% c('gwas_revert','putative_revert')] <- 'revert'
+rstypes[rstypes %in% c('other')] <- NA
+
+grps <- paste(var_annots$gene[!is.na(rstypes)], rstypes[!is.na(rstypes)])
+vars_sub <- vars[,!is.na(rstypes)]
+varcts <- sapply(unique(grps), function(x){
+  rowSums(vars_sub[,grps == x, drop = FALSE])
+})
+varcts <- varcts[tr$tip.label,]
+
+row_ann <- isolate_info %>% select(col_grp) %>% data.frame()
+rownames(row_ann) <- isolate_info$isolate_no
+colnames(row_ann) <- ' '
+
+colnames(varcts) <- gsub('two-component system sensor histidine kinase','',colnames(varcts))
+varcts <- varcts[,order(colnames(varcts))]
+others <- colnames(varcts)[!colnames(varcts) %in% c("crrB r","crrB revert","phoQ r","phoQ revert","mgrB r","phoP revert", "mgrB revert")]
+varcts_other <- rowSums(varcts[,others])
+varcts <- cbind(varcts[,c("crrB r","crrB revert","phoQ r","phoQ revert","mgrB r","phoP revert")], 'other r' = varcts_other)
+
+varcts_bool <- varcts > 0
+varcts_type <- sapply(colnames(varcts_bool), function(x){
+  ifelse(varcts_bool[,x], x, NA)
+})
+hm <- cbind(col_grp=as.character(row_ann[rownames(varcts_type),]),varcts_type)
+hm[grepl(' r$',hm)] <- 'Resistance'
+hm[grepl(' revert$',hm)] <- 'Suppressor'
+colnames(hm) <- c(' ','crrB',' crrB','phoQ',' phoQ','mgrB','phoP','Other')
+hm <- hm[,c(' ','phoQ',' phoQ','mgrB','phoP','crrB',' crrB', 'Other')]
+
+f2 <- gheatmap(tr_grps, hm,
+  width = 0.3, color = NA, colnames = TRUE, colnames_position = 'bottom', hjust = 1, colnames_angle = 90, colnames_offset_y = -5) + 
+  geom_treescale(x = 0.000002, y = 300) + 
+  scale_fill_manual(values = c(grp_cols, 'Resistance'='darkgrey','Suppressor'='lightgrey'),
+                    breaks = c('Resistance','Suppressor')) + 
+  labs(fill = 'Variant type') +
+  ylim(-25, 340) #+ xlim(0, 0.0012)
+ggsave('figures/Fig2.png',f2)
+f2
+```
+
+## THD
+
+```{r}
+genome_length <- 5394056 # KPNIH1 reference genome length
+mutation_rate <- 1.03e-6 # from https://www.ncbi.nlm.nih.gov/pmc/articles/pmid/26196384/ (Fig. 3 legend)
+
+scales <- c('time', 'relative')
+times <- 1
+
+thds <- lapply(scales, function(s){
+  thd_vals <- sapply(times, function(t){
+    thd(H = as.matrix(dists), t = t, m = genome_length, mu = mutation_rate, scale = s)
+  })
+  colnames(thd_vals) <- times
+  thd_vals
+})
+names(thds) <- scales
+
+plotdat <- full_join(isolate_info, data.frame(thds$relative) %>% mutate(isolate_no = rownames(thds$relative))) %>% pivot_longer(cols = starts_with('X'), names_to = 'timescale', values_to = 'thd') %>% 
+  mutate(timescale = gsub('X','',timescale),
+  kfoc_grps = paste(ifelse(kfoc_disrupted, 'disrupted', 'not disrupted'), '&', ifelse(kfoc_disrupted_clade, 'in clade', 'not in clade'))) 
+```
+
+
+
+```{r}
+thd_plotdat <- plotdat %>% filter(!is.na(col_grp)) %>% 
+  group_by(col_grp, timescale, kfoc_disrupted_clade) %>%
+  mutate(median_thd = median(thd),
+         median_thd = ifelse(col_grp == 'S non-revertant', median_thd, NA),
+         kfoc_disrupted_clade = ifelse(kfoc_disrupted_clade, 'Clade IIB', 'Other clades'),
+         grp = as.character(col_grp),
+         grp = ifelse(grp == 'R cluster', 'R', grp),
+         grp = ifelse(grp == 'R singleton', 'R', grp),
+         grp = factor(grp, levels = c('S non-revertant', 'R', 'S revertant'))
+         )
+
+f3 <- thd_plotdat %>% 
+  ggplot(aes(x = col_grp, y = thd, col = col_grp)) + 
+  geom_violin(alpha = 0.5) +
+  geom_jitter(alpha = 0.4) +  
+  facet_grid(~kfoc_disrupted_clade, scales = 'free') +
+    geom_hline(aes(yintercept = median_thd, group = paste(timescale, kfoc_disrupted_clade, col_grp), linetype = 'S non-revertant\nmedian THD'), col = 'darkgrey', size = 1) +
+    stat_summary(fun=median, geom="point", size=2, col = 'black') + scale_y_continuous(trans = 'log10') +
+  labs(x = '', y = 'THD', col = 'Resistance group', linetype = '') + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + 
+  scale_color_manual(values = grp_cols)
+ggsave('figures/Fig3.png',f3, width = 7, height = 4)
+f3
+```
+
+```{r}
+mean(isolate_info$colistin30 == 'yes' & isolate_info$kfoc_disrupted_clade)
+mean(isolate_info$colistin30 == 'yes' & !isolate_info$kfoc_disrupted_clade)
+
+table(isolate_info$colistin30, isolate_info$kfoc_disrupted_clade)
+fisher.test(table(isolate_info$colistin30, isolate_info$kfoc_disrupted_clade))
+```
+
+
+```{r}
+get_wtp <- function(timescale, grp1, grp2, kfoc_dc){
+  w1 <- thd_plotdat$thd[thd_plotdat$timescale == timescale & thd_plotdat$col_grp == grp1 & thd_plotdat$kfoc_disrupted_clade == kfoc_dc]
+  w2 <- thd_plotdat$thd[thd_plotdat$timescale == timescale & thd_plotdat$col_grp == grp2 & thd_plotdat$kfoc_disrupted_clade == kfoc_dc]
+  wtp <- NA
+  if(length(w1) > 0 & length(w2) > 1){
+    wtp <- wilcox.test(w1,w2)$p.value
+  }
+  wtp
+}
+
+clades <- unique(thd_plotdat$kfoc_disrupted_clade)
+names(clades) <- clades
+colgrps <- as.character(unique(thd_plotdat$col_grp))
+names(colgrps) <- as.character(colgrps)
+
+pvals <- lapply(clades, function(c) {
+    sapply(colgrps, function(g1) {
+      sapply(colgrps, function(g2){
+        get_wtp(1, g1, g2, c)
+        })
+      })
+    }) %>% suppressWarnings()
+pvals
+
+```
+
+
+## Colistin use
+
+```{r}
+alpha <- sapply(1:nrow(more_info), function(x){
+  c2 <- more_info$kfoc_disrupted_clade[x]
+  resp <- more_info$source[x] == 'resp'
+  col <- (grepl('colistin', more_info$empiric) | grepl('colistin', more_info$definitive))[x]
+  a <- 'None'
+  if(c2) a <- 'Clade II'
+  if(c2 & col) a <- 'Clade II & Resp'
+  a
+})
+
+more_info$alpha <- alpha
+
+alluvial <- more_info %>% 
+  mutate(kfoc_disrupted_clade = factor(ifelse(kfoc_disrupted_clade, 'Clade IIB', 'Other clades'), 
+                                       levels = c('Clade IIB', 'Other clades')),
+        source = factor(ifelse(source == 'resp', 'Respiratory', 'Other'), 
+                        levels = c('Respiratory','Other')),
+        colistin30 = factor(str_to_sentence(colistin30), levels = c('Yes','No')),
+        colistin_treat = factor(ifelse(grepl('colistin', empiric) | grepl('colistin', definitive),
+                                       'Yes', 'No'), levels = c('Yes','No')),
+        col_grp = factor(col_grp, 
+                         levels = rev(c('S non-revertant', 'S revertant', 'R singleton', 'R cluster'))),
+        alpha = factor(alpha, levels = c('None','Clade II','Clade II & Resp')) #,'Clade II & Resp & Col'))
+        ) %>% 
+  ggplot(aes(axis1 = colistin_treat, axis2 = source, axis3 = kfoc_disrupted_clade)) +
+  geom_alluvium(aes(fill = kfoc_disrupted_clade, alpha = alpha)) +
+  geom_stratum(width = 1/8) +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) + #, angle = 90) +
+  scale_x_continuous(breaks = 1:3, labels = rev(c("Clade", "Source","Colistin for\ntreatment"))) +
+  scale_fill_manual(values = c('darkslateblue','darkseagreen')) + #c('#5F4B8BFF', '#E69A8DFF')) +
+  scale_alpha_discrete(range = c(0.2,1)) +
+  guides(alpha=FALSE) +
+  labs(fill = '', y = 'Number of isolates') +
+  coord_flip()
+alluvial
+```
+
+
+```{r}
+(more_info %>% select(colistin_treat, kfoc_disrupted_clade) %>% table() %>% fisher.test())$p.value
+
+(coltr_r <- sum(more_info$colistin_treat == 'Yes' & more_info$kfoc_disrupted_clade))
+(r <- sum(more_info$kfoc_disrupted_clade))
+coltr_r/r
+
+(coltr_r <- sum(more_info$colistin_treat == 'Yes' & !more_info$kfoc_disrupted_clade))
+(r <- sum(!more_info$kfoc_disrupted_clade))
+coltr_r/r
+
+
+
+(more_info %>% select(colistin30, kfoc_disrupted_clade) %>% table() %>% fisher.test())$p.value
+
+(coltr_r <- sum(more_info$colistin30 == 'yes' & more_info$kfoc_disrupted_clade))
+(r <- sum(more_info$kfoc_disrupted_clade))
+coltr_r/r
+
+(coltr_r <- sum(more_info$colistin30 == 'yes' & !more_info$kfoc_disrupted_clade))
+(r <- sum(!more_info$kfoc_disrupted_clade))
+coltr_r/r
+```
+
+
+```{r}
+treatment_grp <- more_info %>% 
+  mutate(colistin_treat = factor(ifelse(grepl('colistin', empiric) | grepl('colistin', definitive),
+                                       'Yes', 'No'), levels = c('Yes','No'))) %>% 
+  ggplot(aes(x = colistin_treat, fill = col_grp)) +
+  geom_bar(position = 'dodge') + 
+  labs(fill = '', y = 'Count', x = 'Treated with colistin') +
+  scale_fill_manual(values = grp_cols)
+treatment_grp
+```
+
+```{r}
+f4 <- plot_grid(alluvial, treatment_grp, rel_heights = c(1,1), ncol = 1, labels = 'AUTO', align = 'hv')
+ggsave('figures/Fig4.png', f4, width = 7, height = 7)
+
+```
+
+
+
+# Supplement
+
+## Resistance present over time and LTACHs
+
+```{r}
+fs1 <- isolate_info %>% mutate(my = format(Cx_date, "%Y-%m")) %>% 
+    mutate(LTACH = paste0(LTACH, ' (',state,')')) %>% 
+  ggplot(aes(x = my, fill = colistin_disc)) + geom_bar() + facet_wrap(~LTACH, ncol = 7) +
+  scale_fill_manual(values = colors) + 
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  labs(y = 'Number of isolates', x = 'Month', fill = '')
+ggsave('figures/FigS1.png', fs1, width = 15)
+fs1
+```
+
+## Known mutation status of R isolates
+
+```{r}
+fs2 <- isolate_info %>% filter(colistin_disc == 'R') %>%
+  mutate(site_type_putative_r = gsub(' r',' R', gsub('_',' ',str_to_sentence(site_type_putative_r))),
+         site_type_putative_r = gsub('Known', 'Known R', site_type_putative_r),
+         site_type_putative_r = gsub('Gwas R', 'GWAS R', site_type_putative_r),
+         site_type_putative_r = gsub('Known R site', 'Known R\nsite', site_type_putative_r),
+         site_type_putative_r = replace(site_type_putative_r, is.na(site_type_putative_r), 'None'),
+         site_type_putative_r = factor(site_type_putative_r,
+                                       levels = c('Known R', 'Known R\nsite', 'Putative R', 'GWAS R', 'None')),
+         genes_r = replace(genes_r, is.na(genes_r), 'None'),
+         genes_r = gsub('b |b$','B ',genes_r),
+         genes_r = gsub('q |q$','Q ',genes_r),
+         genes_r = gsub('p |p$','P ',genes_r),
+         genes_r = gsub('a |a$','A' , genes_r),
+         genes_r = gsub('two-component system sensor histidine kinase','',genes_r),
+         genes_r = gsub('subunit IIB','',genes_r),
+         genes_r = factor(genes_r, levels = c(sort(unique(genes_r[!genes_r == 'None'])), 'None'))) %>%
+  ggplot(aes(x = site_type_putative_r, fill = genes_r)) + geom_bar() +
+  labs(x = 'Variants explaining resistant isolates', y = 'Number of isolates', fill = 'Gene') + scale_fill_brewer(palette = 'Paired') #+ facet_wrap(~colistin_disc, nrow = 1)
+ggsave('figures/FigS2.png',fs2, width = 7, height = 5)
+fs2
+```
+
+## Toy tree showing resistance group classifications
+
+```{r}
+set.seed(0)
+toy_tr <- rtree(10)
+rclass <- c(rep('R cluster',4),'S revertant',rep('S non-revertant',4),'R singleton')
+names(rclass) <- c('t10','t9','t6','t1','t5','t4','t8','t7','t3','t2')
+rclass <- rclass[toy_tr$tip.label]
+var <- data.frame(variant1=c(rep('Resistance',5),rep(' ',5)),
+                  variant2=c(rep(' ',9),'Resistance'),
+                  variant3=c(rep(' ',4),'Suppressor',rep(' ',5)))
+rownames(var) <- c('t10','t9','t6','t1','t5','t4','t8','t7','t3','t2')
+toy_tr_plot <- ggtree(toy_tr) + geom_tippoint(aes(col = c(rclass,rep(NA,Nnode(toy_tr)))), size = 4) + 
+  labs(col = 'Resistance group') + scale_color_manual(values = grp_cols)
+fs3 <- gheatmap(toy_tr_plot, var, width = 0.2, colnames = FALSE) + 
+  scale_fill_manual(values = c('Resistance' = 'black','Suppressor'='darkgrey',' '='white'),
+                    limits = c('Resistance','Suppressor')) +
+  labs(fill = 'Variant type')
+ggsave('figures/FigS3.png',fs3, width = 4, height = 4)
+fs3
+```
+
+## Big resistance clades across LTACHs
+
+```{r}
+inds <- apply(vars[,which(colSums(vars) > 20)], 1, function(x){
+  i <- which(x == 1)
+  if(length(i) == 0){
+    i <- NA
+  }
+  i
+})
+
+muts <- sapply(var_annots$var[which(colSums(vars) > 20)], function(x){
+  x
+  gsub('p\\.','',paste(strsplit(x,'\\|')[[1]][c(9, 6)], collapse = ' '))
+})[inds]
+names(muts) <- names(inds)
+
+fs4 <- isolate_info %>% 
+  mutate(muts=muts[isolate_no], 
+         muts=ifelse(is.na(muts), 'Neither',muts),
+         muts=factor(muts,levels=c('Neither','mgrB Gln30*','phoQ Thr244Asn'))) %>% 
+  # filter(!is.na(muts)) %>% 
+  ggplot(aes(x = LTACH, fill = muts)) + geom_bar() + #scale_fill_brewer(palette = 'Set2')
+  scale_fill_manual(values = c('lightgrey','cadetblue3','palegreen4')) +
+  labs(y = 'Count', fill = 'Variant') + facet_grid(~state, scales = 'free_x', space = 'free')
+ggsave('figures/FigS4.png',fs4, width = 7, height = 4)
+fs4 
+```
+
+## Mega heatmap of putative resistant and revertant mutations
+
+```{r}
+annot_cols <- list('Resistance type' = grp_cols[names(grp_cols) != 'No confidence'])
+hm_cols <- c('lightgrey','black')
+
+typects <- table(var_annots$literature)[c('known','known_site','putative_r','putative_revert','other','gwas_r')]
+
+hm_col_ann <- var_annots %>% select(-var) %>% 
+  mutate(literature = gsub(' r$',' R', gsub('_',' ',str_to_sentence(literature))),
+         literature = gsub('Known', 'Known R', literature),
+         literature = gsub('Gwas R', 'GWAS R', literature),
+         literature = gsub('Known R site', 'Known R site', literature),
+         literature = replace(literature, is.na(literature), 'None'),
+         # literature = factor(literature, levels = c('Known R', 'Known R site', 'Putative R', 'GWAS R', 'None')),
+         vartype = str_to_sentence(vartype),
+         vartype = ifelse(vartype == 'Snp', 'SNV', vartype),
+         #
+         vartype = factor(vartype, levels = c('Known R','Known R site', 'Putative R', 'Putative revert', 'Other', 'GWAS R'))
+         ) %>% 
+  data.frame()
+rownames(hm_col_ann) <- colnames(vars)
+colnames(hm_col_ann) <- c('Gene','Variant type','Impact','Site type')
+
+hm_row_ann <- isolate_info %>% select(col_grp, clades) %>% 
+  data.frame()
+rownames(hm_row_ann) <- isolate_info$isolate_no
+colnames(hm_row_ann) <- c('Resistance type','Clade')
+
+vars_plot <- vars[tr$tip.label,]
+
+fs5 <- pheatmap(vars_plot,
+         cluster_rows = FALSE, cluster_cols = FALSE,
+         show_rownames = FALSE, show_colnames = FALSE,
+         annotation_row = hm_row_ann,
+         annotation_col = hm_col_ann,
+         border_color = NA, color = hm_cols, annotation_colors = annot_cols, 
+         gaps_col = cumsum(typects))
+ggsave('figures/FigS5.png',fs5, width = 10, height = 10)
+fs5
+```
+
+
+## Table of variant info
+
+```{r}
+muts <- unname(sapply(var_annots$var, function(x){
+  gsub('p\\.','',strsplit(x,'\\|')[[1]][c(6)])
+}))
+bind_cols(var_annots, mutation=muts, n_isolates=colSums(vars)) %>% select(-var) %>% 
+  mutate(vartype = ifelse(vartype == 'snp','SNV',str_to_title(vartype)),
+         impact = tolower(impact))
+```
+
